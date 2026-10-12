@@ -14,23 +14,24 @@ std::uniform_int_distribution<> distrib(1, 4);
 int randomNumber = 1;
 
 const GLint WIDTH = 800, HEIGHT = 800; // Константи початкової ширини та висоти вікна
-GLuint shader, uniformModel, IBO, uniformProjection; // Глобальні змінні для об'єктів у пам'яті відеокарти shader - ID скомпільованої шейдерної програми, а uniformModel - ID для передачі матриці 4х4 у вершинний шейдер...
+GLuint shader, uniformModel, uniformProjection; // Глобальні змінні для об'єктів у пам'яті відеокарти shader - ID скомпільованої шейдерної програми, а uniformModel - ID для передачі матриці 4х4 у вершинний шейдер...
 const float toRadians = 3.14159265f / 180.0f; // Коефіцієнт для переведення кутів із градусів у радіани
 float curAngle = 0.0f; // Поточний кут повороту фігури
 // Структура, що об'єднує дані одного об'єкта
 struct Figure {
 	GLuint VAO; // ID масиву налаштувань буферів
 	GLuint VBO; // ID буфера з чистими координатами у відеопам'яті
+	GLuint IBO;
 	int verteciesAmount; // Реальна кількість вершин у фігурі
 };
-bool directionX = true; // Напрямок руху: true — вправо, false — вліво
-bool directionY = true; // Напрямок руху: true — вгору, false — вниз
-bool alive = true; // Стан фігури: true - фігура рухається, пульсує та обертається
-float triOffsetX = 0.0f; // Поточне зміщення фігури по осі X
-float triOffsetY = 0.0f; // Поточне зміщення фігури по осі Y
-float impulse = 0.09f; // Поточна швідкість переміщення фігури
-float impulseCur = 10.0f; // Поточна швидкість обертання фігури
-float curSize = 0.4f; // Поточний розмір фігури
+bool direction = true;
+float triOffset = 0.0f;
+float triMaxOffset = 0.7f;
+float triIncrement = 0.0002f;
+bool sizeDirection = true;
+float curSize = 0.4f;
+float maxSize = 0.8f;
+float minSize = 0.1f;
 
 // Створюємо текст вершиного шейдера, який використовується для перетворення вершин у відповідні координати на екрані
 static const char* vShader = R"(
@@ -38,29 +39,37 @@ static const char* vShader = R"(
 	// in (це вхідні дані, які приходять у шейдер ззовні)
 	// vec3 (координати у форматі вектора 3-х чисел типу float для кожної точки)
 	// layout (location = 0) номер порту, який зв'язує C++ масив із цим шейдером
-	layout(location = 0) in vec3 pos;  
+	layout(location = 0) in vec3 pos;
+	out vec4 vCol;  
 	uniform mat4 model; // Створюємо Uniform-змінну для передачі матриці моделі 4х4
+	uniform mat4 projection;
 	void main()	{ // Головна функція шейдера, яка викликається окремо для кожної вершини
-			gl_Position = model * vec4(pos, 1.0); // Змінна, в яку записується фінальна позиція точки на екрані, вона вимагає 3 координати (X, Y, Z) та 4 - перспективу 
+			gl_Position = projection * model * vec4(pos, 1.0); // Змінна, в яку записується фінальна позиція точки на екрані, вона вимагає 3 координати (X, Y, Z) та 4 - перспективу 
+			vCol = vec4(clamp(pos, 0.0f, 1.0f), 1.0);
 	}
 )";
 
 // Створюємо текст фрагметного шейдера, який буде керувати кольором пікселей
 static const char* fShader = R"(
 	#version 330
+	in vec4 vCol;
 	out vec4 colour; // out (вихідні дані, які шейдер відає назовні для подальшого відображення пікселю на екран
-	uniform vec4 objectColor; // Створюємо Uniform-змінну для передачі кольору між C++ та відеокартою
 		void main()	{ // Головна функція шейдера, яка викликається окремо для кожного пікселя
-			colour = objectColor; // Керуємо коліром в форматі RGBA, присвоюємо пікселю той колір, який передасть C++
+			colour = vCol; // Керуємо коліром в форматі RGBA, присвоюємо пікселю той колір, який передасть C++
 		}
 )";
 
 // Функція створення фігури
-Figure CreateFigure(GLfloat* vertices, int size) {
+Figure CreateFigure(GLfloat* vertices, int size, unsigned short* indices, int sizeIndices) {
 	Figure newFig;
 	newFig.verteciesAmount = size / (3 * sizeof(GLfloat)); // Рахуємо кількість вершин
 	glGenVertexArrays(1, &newFig.VAO); // Створюємо VAO, яка буде запам'ятовувати всі налаштування буферів 
 	glBindVertexArray(newFig.VAO); // Активуємо VAO
+
+	glGenBuffers(1, &newFig.IBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, newFig.IBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeIndices, indices, GL_STATIC_DRAW);
+
 	glGenBuffers(1, &newFig.VBO); // Створюємо VBO буфер, куди фізично завантажимо координати фігури
 	glBindBuffer(GL_ARRAY_BUFFER, newFig.VBO); // Активуємо VBO
 	glBufferData(GL_ARRAY_BUFFER, size, vertices, GL_STATIC_DRAW); // Копіюємо масив точок з ОЗП у VRAM
@@ -124,18 +133,7 @@ void CompileShaders() {
 		return;
 	}
 	uniformModel = glGetUniformLocation(shader, "model"); // находимо адресу змінної "model" всередині шейдеру і записуємо її в глобальний ідентифікатор uniformModel
-}
-
-// Функція, яка повертає коефіцієнт руху по осі Х
-float GetDirectionX() {
-	if (directionX) return 1.0f;
-	else return -1.0f;
-}
-
-// Функція, яка повертає коефіцієнт руху по осі У
-float GetDirectionY() {
-	if (directionY) return 1.0f;
-	else return -1.0f;
+	uniformProjection = glGetUniformLocation(shader, "projection");
 }
 
 int main() {
@@ -168,76 +166,74 @@ int main() {
 		glfwTerminate(); // Завершуємо роботу GLFW
 		return 1;
 	}
+	glEnable(GL_DEPTH_TEST);
 	glViewport(0, 0, bufferWidth, bufferHeight); // Налаштовуємо область перегляду OpenGL
-	// Координати вершин прямокутника
+	// Координати вершин куба
 	GLfloat squareV[] = {
-		-0.5f, -0.4f, 0.0f, // Лівий нижній кут
-		-0.5f,  0.4f, 0.0f, // Лівий верхній кут
-		0.5f, -0.4f, 0.0f, // Правий нижній кут
-		-0.5f,  0.4f, 0.0f, // Лівий верхній кут 
-		0.5f,  0.4f, 0.0f, // Правий верхній кут
-		0.5f, -0.4f, 0.0f  // Правий нижній кут
+		-1.0f, 1.0f, 1.0f,
+		-1.0f, -1.0f, 1.0f,
+		-1.0f, -1.0f, -1.0f,
+		-1.0f, 1.0f, -1.0f,
+
+		1.0f, 1.0f, 1.0f,
+		1.0f, -1.0f, 1.0f,
+		1.0f, -1.0f, -1.0f,
+		1.0f, 1.0f, -1.0f
+	};
+	unsigned short indices[] = {
+		0, 1, 2,
+		0, 2, 3,
+		0, 1, 5,
+		0, 4, 5,
+		4, 5, 6,
+		4, 6, 7,
+		0, 4, 7,
+		0, 3, 7,
+		1, 2, 6,
+		1, 5, 6,
+		2, 3, 6,
+		3, 6, 7
 	};
 
-	Figure squre = CreateFigure(squareV, sizeof(squareV)); // Створюємо геометрію прямокутника 
+	Figure squre = CreateFigure(squareV, sizeof(squareV), indices, sizeof(indices)); // Створюємо геометрію куба
 	CompileShaders(); // Компілюємо шейдери
-	GLint colorLoc = glGetUniformLocation(shader, "objectColor"); // Знаходимо змінну "objectColor" у пам'яті шейдер
+	glm::mat4 projection = glm::perspective(glm::radians(90.0f), (GLfloat)bufferWidth / (GLfloat)bufferHeight, 0.1f, 100.0f);
+	glm::mat4 projectionORTHO = glm::ortho(0.0f, (GLfloat)bufferWidth, 0.0f, (GLfloat)bufferHeight, -100.0f, 100.0f);
 	while (!glfwWindowShouldClose(mainWindow)) // Головний цикл роботи програми, працює, поки користувач не закриє вікно
 	{
 		glfwPollEvents(); // Перевіряємо та обробляємо події
-		impulse *= 0.999f; // В кожному кадрі зменшуємо швидкість руху фигури на 0.1% 
-		if (impulse < 0.0001f) { impulse = 0.0f; alive = false; } // переводимо фігуру в стан "мертва" якщо швидкість руху фігури занадто мала
-		switch (randomNumber) { // Вибір напрямку руху фігури на основі рандомного числа
-		case 1:
-			triOffsetX += GetDirectionX() * impulse; // Рух по горизонталі
-			break;
-		case 2:
-			triOffsetX += GetDirectionX() * impulse; // Рух по діагоналі
-			triOffsetY += GetDirectionY() * impulse;
-			break;
-		case 3:
-			triOffsetY += GetDirectionY() * impulse; // Рух по вертикалі
-			break;
-		case 4:
-			triOffsetX += GetDirectionX() * impulse; // Рух по діагоналі
-			triOffsetY += GetDirectionY() * impulse;
-			break;
-		}
-		float dynamicMaxOffset = 1.0f - (curSize * 0.5f); // Розраховуємо невидиму стіну, використовуючи розмір поточної фігури
-		if (abs(triOffsetX) >= dynamicMaxOffset) { // Якщо фігура зіткнулася зі стіною по оси Х
-			if (triOffsetX > 0) triOffsetX = dynamicMaxOffset; // Якщо фігура зіштовхнулася з правою стіною, то фігуру відштовхуємо від стіни
-			else triOffsetX = -dynamicMaxOffset; // Інакше фігура зіштовхнулася з лівою стіною
-			directionX = !directionX; // Якщо вперлися межу екрану, тоді міняємо напрямок по оси Х на протилежний
-			randomNumber = distrib(gen); // Генеруємо новий напрямок руху фігури при зіткненні зі стіною
-		}
-		if (abs(triOffsetY) >= dynamicMaxOffset) { // Якщо фігура зіткнулася зі стіною по оси У
-			if (triOffsetY > 0) triOffsetY = dynamicMaxOffset; // Якщо фігура зіштовхнулася зі стелею, то фігуру відштовхуємо від стіни
-			else triOffsetY = -dynamicMaxOffset; // Інакше фігура зіштовхнулася з підлогою
-			directionY = !directionY; // Якщо вперлися межу екрану, тоді міняємо напрямок по оси Уна протилежний
-			randomNumber = distrib(gen); // Генеруємо новий напрямок руху фігури при зіткненні зі стіною
-		}
-		impulseCur *= 0.999f; // В кожному кадрі зменшуємо швидкість повороту фигури на 0.1% 
-		curAngle += impulseCur; // На кожному кадрі збільшуємо кут повороту
+		
+		curAngle += 1;
 		if (curAngle >= 360) {
-			curAngle = 0; // Обнуляємо кут при повному оберті, щоб число не росло до нескінченності
+			curAngle -= 360;
 		}
 		float time = (float)glfwGetTime(); // Отримуємо точний час роботи програми в секундах від GLFW
-		float heartImpulse = powf(sinf(time * 6.0f), 6.0f); // Створюємо ефект різкого поштовху та довгого спокою 
-		if (alive) curSize = 0.2f + 0.1f * heartImpulse; // Поки фігура "жива", вона активно пульсує в межах від 0.2 до 0.3
-		else curSize = 0.2f;
+		float moveImpulse = powf(sinf(time), 6.0f) * 20; 
+		
 		glClearColor(0.0f, 0.3f, 1.0f, 1.0f); // Встановлюємо колір для очищення екрану RGBA
-		glClear(GL_COLOR_BUFFER_BIT); // Очищаємо буфер кольору кадру за допомогою вказаного вище кольору
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // Очищаємо буфер кольору кадру за допомогою вказаного вище кольору
 		glUseProgram(shader); // Вмикаємо шейдерну програму
-		if (alive) glUniform4f(colorLoc, 1.0f, 0.0f, 0.0f, 1.0f); // Передаємо значення коліру до шейдеру
-		else glUniform4f(colorLoc, 0.5f, 0.5f, 0.5f, 1.0f); // Передаємо значення коліру до шейдеру
 		glm::mat4 model(1.0f); // Ініціалізація одиничної матриці моделі
-		model = glm::translate(model, glm::vec3(triOffsetX, triOffsetY, 0.0f)); // Додаємо зміщення по осях Х та У
-		model = glm::rotate(model, curAngle * toRadians, glm::vec3(0.0f, 0.0f, 1.0f)); // Додаємо обертання об'єкта навколо осі Z
-		model = glm::scale(model, glm::vec3(curSize, curSize, 1.0f)); // Додаємо масштаб, множимо осі X та Y на коефіцієнт curSize
+		model = glm::translate(model, glm::vec3(0.0f, 1.0f, -3.0f - moveImpulse)); // Додаємо зміщення по осях Х та У
+		model = glm::rotate(model, 45.0f * toRadians, glm::vec3(1.0f, 0.0f, 0.0f));
+		model = glm::rotate(model, curAngle * toRadians, glm::vec3(0.0f, 1.0f, 0.0f)); // Додаємо обертання об'єкта навколо осі Z
+		model = glm::scale(model, glm::vec3(0.5f, 0.5f, 0.5f)); // Додаємо масштаб, множимо осі X та Y на коефіцієнт curSize
 		glUniformMatrix4fv(uniformModel, 1, GL_FALSE, glm::value_ptr(model)); // Передаємо готову фінальну матрицю 4х4 у вершинний шейдер без перевороту (GL_FALSE)
-
+		glUniformMatrix4fv(uniformProjection, 1, GL_FALSE, glm::value_ptr(projection));
+		
+		
 		glBindVertexArray(squre.VAO); // Вмикаємо налаштування фігури
-		glDrawArrays(GL_TRIANGLES, 0, squre.verteciesAmount); // Даємо команду намалювати фігуру прямокутник
+		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, 0); // Даємо команду намалювати фігуру прямокутник
+
+		glm::mat4 modelORTHO(1.0f); // Ініціалізація одиничної матриці моделі
+		modelORTHO = glm::translate(modelORTHO, glm::vec3((float)bufferWidth / 2.0f, 200.0f, -40.0f - moveImpulse)); // Додаємо зміщення по осях Х та У
+		modelORTHO = glm::rotate(modelORTHO, 30.0f * toRadians, glm::vec3(1.0f, 0.0f, 0.0f));
+		modelORTHO = glm::rotate(modelORTHO, curAngle * toRadians, glm::vec3(0.0f, 1.0f, 0.0f)); // Додаємо обертання об'єкта навколо осі Z
+		modelORTHO = glm::scale(modelORTHO, glm::vec3(80.0f, 80.0f, 80.0f)); // Додаємо масштаб, множимо осі X та Y на коефіцієнт curSize
+		glUniformMatrix4fv(uniformModel, 1, GL_FALSE, glm::value_ptr(modelORTHO)); // Передаємо готову фінальну матрицю 4х4 у вершинний шейдер без перевороту (GL_FALSE)
+
+		glUniformMatrix4fv(uniformProjection, 1, GL_FALSE, glm::value_ptr(projectionORTHO));
+		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, 0); // Даємо команду намалювати фігуру прямокутник
 
 		// Очищення, для того, щоб інші об'єкти не малювалися цим шейдером
 		glBindVertexArray(0);
