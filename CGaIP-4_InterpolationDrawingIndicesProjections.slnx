@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="CGaIP-4_InterpolationDrawingIndicesProjections/CGaIP-4_InterpolationDrawingIndicesProjections.vcxproj" Id="3a05d578-c5ab-4854-b99d-9fe54ec43bfc" />
+</Solution>
